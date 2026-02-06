@@ -3,6 +3,156 @@
 import getGeminiResponse from '../services/geminiService.js';
 import Report from '../models/Report.js';
 
+const GEMINI_ONLY_PREDICT = process.env.GEMINI_ONLY_PREDICT === 'true';
+const SUGGESTION_CACHE_TTL_MS = Number(process.env.SUGGESTION_CACHE_TTL_MS || 10 * 60 * 1000); // 10 min
+const SUGGESTION_THROTTLE_MS = Number(process.env.SUGGESTION_THROTTLE_MS || 5000); // 5 sec
+
+// Allowed fields for AI suggestions (camelCase to match frontend)
+const SUGGESTION_FIELDS = [
+    'oreGrade',
+    'productionVolume',
+    'energyConsumptionMining',
+    'energyTypeMining',
+    'waterConsumptionMining',
+    'emissionsMining',
+    'emissionsTypeMining',
+    'landUse',
+    'transportToProcessing',
+    'transportDistanceToProcessing',
+    'energySource',
+    'energyConsumptionProcessing',
+    'processingRoute',
+    'recycledInputRate',
+    'recoveryRate',
+    'transportDistances',
+    'transportMode',
+    'productLifetime',
+    'reuseRate',
+    'recyclingRate',
+    'recyclingEfficiency',
+    'disposalRoute',
+    'transportDisposal',
+    'globalWarmingPotential',
+    'acidificationPotential',
+    'eutrophicationPotential',
+    'ozoneDepletionPotential',
+    'waterScarcityFootprint',
+    'cumulativeEnergyDemand'
+];
+
+const SUGGESTION_FIELD_HINTS = {
+    oreGrade: 'Ore Grade (%)',
+    productionVolume: 'Production Volume (tonnes)',
+    energyConsumptionMining: 'Energy Consumption (MJ/tonne ore)',
+    energyTypeMining: 'Energy Type (diesel, electricity, natural_gas, mixed)',
+    waterConsumptionMining: 'Water Consumption (m3/tonne ore)',
+    emissionsMining: 'Emissions (kg CO2-eq/tonne ore)',
+    emissionsTypeMining: 'Emissions Type (dust, particulates, methane, mixed)',
+    landUse: 'Land Use (m2/tonne ore)',
+    transportToProcessing: 'Transport to Processing (truck, rail, ship, mixed)',
+    transportDistanceToProcessing: 'Transport Distance (km)',
+    energySource: 'Energy Source (grid, coal, natural_gas, renewables, mixed)',
+    energyConsumptionProcessing: 'Energy Consumption (MJ/tonne)',
+    processingRoute: 'Processing Route (primary, secondary, mixed)',
+    recycledInputRate: 'Recycled Input Rate (%)',
+    recoveryRate: 'Recovery Rate (%)',
+    transportDistances: 'Transport Distances (km)',
+    transportMode: 'Transport Mode (truck, rail, ship, air, mixed)',
+    productLifetime: 'Expected Product Lifetime (years)',
+    reuseRate: 'Reuse / Repurposing Rate (%)',
+    recyclingRate: 'Recycling Rate (%)',
+    recyclingEfficiency: 'Recycling Efficiency (%)',
+    disposalRoute: 'Disposal Route (landfill, incineration, special_waste, mixed)',
+    transportDisposal: 'Transport for Disposal (km)',
+    globalWarmingPotential: 'Global Warming Potential (kg CO2-eq)',
+    acidificationPotential: 'Acidification Potential (kg SO2-eq)',
+    eutrophicationPotential: 'Eutrophication Potential (kg PO4-eq)',
+    ozoneDepletionPotential: 'Ozone Depletion Potential (kg CFC-11-eq)',
+    waterScarcityFootprint: 'Water Scarcity Footprint (m3-eq)',
+    cumulativeEnergyDemand: 'Cumulative Energy Demand (MJ)'
+};
+
+const DEFAULT_SUGGESTIONS = {
+    energyConsumptionMining: 5000,
+    waterConsumptionMining: 2000,
+    oreGrade: 0.5,
+    recycledInputRate: 10,
+    recoveryRate: 85,
+    transportDistanceToProcessing: 120,
+    transportDistances: 800,
+    productLifetime: 20,
+    recyclingRate: 40,
+    recyclingEfficiency: 80
+};
+
+const SELECT_FIELD_OPTIONS = {
+    energyTypeMining: ['diesel', 'electricity', 'natural_gas', 'mixed'],
+    emissionsTypeMining: ['dust', 'particulates', 'methane', 'mixed'],
+    transportToProcessing: ['truck', 'rail', 'ship', 'mixed'],
+    energySource: ['grid', 'coal', 'natural_gas', 'renewables', 'mixed'],
+    processingRoute: ['primary', 'secondary', 'mixed'],
+    transportMode: ['truck', 'rail', 'ship', 'air', 'mixed'],
+    disposalRoute: ['landfill', 'incineration', 'special_waste', 'mixed']
+};
+
+const SUGGESTION_FIELDS_SET = new Set(SUGGESTION_FIELDS);
+const suggestionCache = new Map();
+const lastRequestByIp = new Map();
+
+function isMissingValue(value) {
+    return value === undefined || value === null || value === '';
+}
+
+function normalizeSuggestionKey(key) {
+    if (!key || typeof key !== 'string') return key;
+    const trimmed = key.trim();
+    return trimmed.replace(/[_-]([a-zA-Z0-9])/g, (_, c) => c.toUpperCase());
+}
+
+function normalizeSuggestionValue(field, value) {
+    if (SELECT_FIELD_OPTIONS[field]) {
+        if (typeof value !== 'string') return undefined;
+        const normalized = value.trim().toLowerCase().replace(/\s+/g, '_').replace(/-+/g, '_');
+        const options = SELECT_FIELD_OPTIONS[field];
+        if (options.includes(normalized)) return normalized;
+        return undefined;
+    }
+
+    if (value === undefined || value === null) return undefined;
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : undefined;
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) return undefined;
+        const direct = Number(trimmed);
+        if (Number.isFinite(direct)) return direct;
+        const match = trimmed.match(/-?\d+(\.\d+)?/);
+        if (match) {
+            const parsed = Number(match[0]);
+            return Number.isFinite(parsed) ? parsed : undefined;
+        }
+    }
+    return undefined;
+}
+
+function stableStringify(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) {
+        return `[${value.map(stableStringify).join(',')}]`;
+    }
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+}
+
+function buildSuggestionCacheKey(data, missingFields) {
+    const payload = {
+        missingFields: [...missingFields].sort(),
+        data
+    };
+    return stableStringify(payload);
+}
+
 /**
  * Helper function to clean Gemini response by removing markdown code block syntax
  * @param {string} response - Raw response from Gemini
@@ -55,19 +205,77 @@ async function suggestParameters(req, res) {
         
         console.log("Controller: Received partial data for suggestions:", partialData);
 
+        const targetFields = Array.isArray(req.body.targetFields)
+            ? req.body.targetFields.map(normalizeSuggestionKey)
+            : [];
+
+        const providedData = Object.entries(partialData || {}).reduce((acc, [key, value]) => {
+            const normalizedKey = normalizeSuggestionKey(key);
+            acc[normalizedKey] = value;
+            return acc;
+        }, {});
+
+        const missingFields = (targetFields.length ? targetFields : SUGGESTION_FIELDS)
+            .filter((field) => SUGGESTION_FIELDS_SET.has(field))
+            .filter((field) => isMissingValue(providedData[field]));
+
+        if (missingFields.length === 0) {
+            return res.json({ success: true, suggestions: {} });
+        }
+
+        const filledFieldCount = (targetFields.length ? targetFields : SUGGESTION_FIELDS)
+            .filter((field) => SUGGESTION_FIELDS_SET.has(field))
+            .filter((field) => !isMissingValue(providedData[field])).length;
+
+        if (filledFieldCount === 0) {
+            return res.json({
+                success: true,
+                suggestions: {},
+                warning: "Add at least one value before requesting predictions."
+            });
+        }
+
+        const cacheKey = buildSuggestionCacheKey(providedData, missingFields);
+        const cached = suggestionCache.get(cacheKey);
+        if (cached && (Date.now() - cached.timestamp) < SUGGESTION_CACHE_TTL_MS) {
+            return res.json({ success: true, suggestions: cached.suggestions, cached: true });
+        }
+
+        const clientId = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+        const lastRequestTime = lastRequestByIp.get(clientId);
+        if (lastRequestTime && (Date.now() - lastRequestTime) < SUGGESTION_THROTTLE_MS) {
+            if (cached) {
+                return res.json({ success: true, suggestions: cached.suggestions, cached: true });
+            }
+            return res.json({
+                success: true,
+                suggestions: {},
+                warning: "Please wait a moment before requesting more predictions."
+            });
+        }
+        lastRequestByIp.set(clientId, Date.now());
+
         const prompt = `
-            You are an expert Life Cycle Assessment (LCA) analyst for the mining and metallurgy industry.
-            A user is providing partial data for a metallurgical process. Your task is to suggest realistic values for common MISSING parameters.
-            The partial data provided is:
-            ${JSON.stringify(partialData, null, 2)}
+You are an expert Life Cycle Assessment (LCA) analyst for the mining and metallurgy industry.
+Suggest realistic values ONLY for the missing parameters listed below. Use the same camelCase keys.
 
-            Possible missing parameters to suggest for include: 'energy_consumption_kwh', 'water_usage_liters', 'transport_distance_km', 'waste_generated_kg', 'recycled_content_percentage', 'ore_grade_percentage', 'processing_yield_percentage'.
+Partial data (known):
+${JSON.stringify(providedData, null, 2)}
 
-            Return your suggestions ONLY as a valid JSON object. The keys must be the parameter names and the values must be the suggested inputs. Do not add any text, explanation, or markdown formatting outside the JSON object.
-            If all relevant parameters are already present, return an empty JSON object: {}.
+Missing parameters to suggest (use these exact keys only):
+${JSON.stringify(missingFields, null, 2)}
 
-            Example Response: {"water_usage_liters": 50000, "transport_distance_km": 150}
-        `;
+Hints for missing fields:
+${JSON.stringify(missingFields.reduce((acc, field) => {
+    acc[field] = SUGGESTION_FIELD_HINTS[field] || field;
+    return acc;
+}, {}), null, 2)}
+
+Return ONLY a valid JSON object with those keys and suggested numeric or categorical values. No extra text.
+If you cannot infer a field, omit it from the JSON object.
+Example response:
+{"energyConsumptionMining": 5200, "energyTypeMining": "diesel"}
+        `.trim();
 
         const geminiResponseText = await getGeminiResponse(prompt);
         console.log("Controller: Gemini raw suggestion response:", geminiResponseText);
@@ -84,19 +292,33 @@ async function suggestParameters(req, res) {
             console.error("Controller: Failed to parse Gemini's suggestions JSON:", parseError.message);
             console.error("Controller: Gemini's unparseable response was:", geminiResponseText);
             
-            // Use hardcoded fallback suggestions for the most common parameters
-            suggestions = {
-                "energyConsumptionMining": 5000,
-                "waterConsumptionMining": 2000,
-                "oreGrade": 0.5,
-                "recycledInputRate": 10,
-                "recoveryRate": 85
-            };
-            
-            console.log("Controller: Using fallback suggestions:", suggestions);
+            suggestions = {};
         }
-        
-        res.json({ success: true, suggestions });
+
+        const normalizedSuggestions = Object.entries(suggestions || {}).reduce((acc, [key, value]) => {
+            const normalizedKey = normalizeSuggestionKey(key);
+            if (!SUGGESTION_FIELDS_SET.has(normalizedKey)) return acc;
+            if (!missingFields.includes(normalizedKey)) return acc;
+            const normalizedValue = normalizeSuggestionValue(normalizedKey, value);
+            if (normalizedValue === undefined) return acc;
+            acc[normalizedKey] = normalizedValue;
+            return acc;
+        }, {});
+
+        if (Object.keys(normalizedSuggestions).length === 0) {
+            missingFields.forEach((field) => {
+                if (DEFAULT_SUGGESTIONS[field] !== undefined) {
+                    normalizedSuggestions[field] = DEFAULT_SUGGESTIONS[field];
+                }
+            });
+        }
+
+        suggestionCache.set(cacheKey, {
+            timestamp: Date.now(),
+            suggestions: normalizedSuggestions
+        });
+
+        res.json({ success: true, suggestions: normalizedSuggestions });
 
     } catch (error) {
         console.error("Controller: Error in suggestParameters:", error.message);
@@ -121,6 +343,15 @@ async function generateRecommendations(req, res) {
         }
 
         console.log("Controller: Received full data for recommendations:", fullData);
+
+        if (GEMINI_ONLY_PREDICT) {
+            const fallbackReport = generateFallbackResponse('recommendations', fullData);
+            return res.json({
+                success: true,
+                report: fallbackReport,
+                warning: "AI recommendations disabled (predict-only mode)."
+            });
+        }
 
         const prompt = `
             You are an expert Life Cycle Assessment (LCA) analyst specializing in the mining and metallurgy industry.
@@ -395,6 +626,15 @@ async function getNodeInsights(req, res) {
       Limit your response to just the JSON object - no additional explanations, markdown, or comments.
     `;
     
+    if (GEMINI_ONLY_PREDICT) {
+      const fallbackInsights = generateFallbackNodeInsights(nodeType, formData);
+      return res.json({
+        success: true,
+        insights: fallbackInsights,
+        warning: "AI node insights disabled (predict-only mode)."
+      });
+    }
+
     // Get response from Gemini service
     const geminiResponse = await getGeminiResponse(prompt);
     console.log(`Raw Gemini response for ${nodeType}:`, geminiResponse);

@@ -7,6 +7,16 @@ const userSchema = new mongoose.Schema({
     required: [true, 'Please provide a name'],
     trim: true
   },
+  firstName: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  lastName: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   email: {
     type: String,
     required: [true, 'Please provide an email'],
@@ -15,11 +25,74 @@ const userSchema = new mongoose.Schema({
     trim: true,
     match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email']
   },
+  phone: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  location: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  department: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  position: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  joinDate: {
+    type: Date,
+    default: Date.now
+  },
+  bio: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   password: {
     type: String,
     required: [true, 'Please provide a password'],
     minlength: 6,
     select: false
+  },
+  preferences: {
+    notifications: {
+      emailAlerts: { type: Boolean, default: true },
+      pushNotifications: { type: Boolean, default: false },
+      weeklyReports: { type: Boolean, default: true },
+      projectUpdates: { type: Boolean, default: true },
+      teamNotifications: { type: Boolean, default: false }
+    },
+    display: {
+      theme: { type: String, default: 'light' },
+      language: { type: String, default: 'en' },
+      timezone: { type: String, default: 'America/Los_Angeles' },
+      dateFormat: { type: String, default: 'MM/DD/YYYY' },
+      numberFormat: { type: String, default: 'US' }
+    },
+    privacy: {
+      profileVisibility: { type: String, default: 'team' },
+      activitySharing: { type: Boolean, default: true },
+      dataSharing: { type: Boolean, default: false },
+      twoFactorAuth: { type: Boolean, default: false }
+    }
+  },
+  teamId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  teamRole: {
+    type: String,
+    default: 'Admin'
+  },
+  lastActive: {
+    type: Date,
+    default: Date.now
   },
   createdAt: {
     type: Date,

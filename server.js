@@ -6,6 +6,7 @@ import express, { json } from 'express';
 import cors from 'cors';
 import lcaRoutes from './routes/lcaRoutes.js';
 import authRoutes from './routes/authRoutes.js';
+import teamRoutes from './routes/teamRoutes.js';
 dotenv.config(); 
 
 const app = express();
@@ -26,6 +27,7 @@ app.get('/', (req, res) => {
 
 app.use('/api/lca', lcaRoutes); 
 app.use('/api/auth', authRoutes); 
+app.use('/api/team', teamRoutes);
 
 
 app.use((err, req, res, next) => {
