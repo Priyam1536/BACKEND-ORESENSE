@@ -11,7 +11,7 @@ if (!globalThis.fetch) {
 
 // Environment configuration
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const USE_MOCK = process.env.USE_MOCK_RESPONSES === 'true';
+const USE_MOCK = process.env.USE_MOCK_RESPONSES === 'false';
 const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '2');
 
 if (!GEMINI_API_KEY && !USE_MOCK) {

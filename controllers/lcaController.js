@@ -3,7 +3,7 @@
 import getGeminiResponse from '../services/geminiService.js';
 import Report from '../models/Report.js';
 
-const GEMINI_ONLY_PREDICT = process.env.GEMINI_ONLY_PREDICT === 'true';
+const GEMINI_ONLY_PREDICT = process.env.GEMINI_ONLY_PREDICT === 'false';
 const SUGGESTION_CACHE_TTL_MS = Number(process.env.SUGGESTION_CACHE_TTL_MS || 10 * 60 * 1000); // 10 min
 const SUGGESTION_THROTTLE_MS = Number(process.env.SUGGESTION_THROTTLE_MS || 5000); // 5 sec
 
